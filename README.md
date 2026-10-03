@@ -82,7 +82,7 @@ flowchart LR
 
 ## Commands
 
-### Main Commands (C-c a e prefix)
+### Main Commands (`C-c a e` prefix by default)
 
 | Key | Command | Description |
 |-----|---------|-------------|
@@ -95,6 +95,17 @@ flowchart LR
 | `T` | `mu4e-llm-translate-thread` | Translate entire thread |
 | `a` | `mu4e-llm-abort` | Abort current operation |
 | `?` | `mu4e-llm-help` | Show help |
+
+The prefix is `mu4e-llm-keymap-prefix`. Any key description works, including
+a single unmodified key, which suits mu4e because its buffers are modal:
+
+```elisp
+(setq mu4e-llm-keymap-prefix "i")   ; then `i s' summarises
+```
+
+To hang the commands under a shared prefix map of your own, set
+`mu4e-llm-parent-keymap` to the symbol naming it and
+`mu4e-llm-parent-keymap-suffix` to the key to use inside it.
 
 ### Draft Buffer Keys
 
@@ -177,6 +188,30 @@ All options are customizable via `M-x customize-group RET mu4e-llm RET`.
 ;; Maximum response length
 (setq mu4e-llm-max-tokens 2048)
 ```
+
+### Model and Reasoning per Operation
+
+Summarising a thread and drafting a reply want different things. One wants
+speed and costs almost nothing; the other is read by a person. Pin a model,
+a reasoning level, or both, per operation:
+
+```elisp
+(setq mu4e-llm-operation-models
+      '((summary           . (:model "gpt-6-luna"  :reasoning "low"))
+        (executive-summary . (:model "gpt-6-luna"  :reasoning "low"))
+        (translate         . (:model "gpt-6-luna"  :reasoning "low"))
+        (draft             . (:model "gpt-6.1-sol" :reasoning "medium"))
+        (compose           . (:model "gpt-6.1-sol" :reasoning "medium"))
+        (refine            . (:model "gpt-6.1-sol" :reasoning "medium"))))
+```
+
+Nothing inherits, so list every operation you want to pin. An operation left
+out uses the provider as usual, and the default of nil changes nothing.
+
+`:reasoning` is sent as a `reasoning_effort` request parameter, so its values
+are the provider's own. Note that reasoning tokens are billed as output
+tokens, which makes a high reasoning level on an expensive model the costly
+combination.
 
 ### Thread Extraction
 

@@ -26,7 +26,8 @@
 ;;   (require 'mu4e-llm)
 ;;   (mu4e-llm-setup)
 ;;
-;; Then in mu4e, use C-c a e prefix for AI commands:
+;; Then in mu4e, use the C-c a e prefix for AI commands (configurable
+;; through `mu4e-llm-keymap-prefix'):
 ;;   C-c a e s - Summarize thread
 ;;   C-c a e r - Generate smart reply
 ;;   C-c a e t - Translate message
