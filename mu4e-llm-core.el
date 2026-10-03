@@ -178,11 +178,14 @@ Returns the llm request object."
                (when on-complete
                  (funcall on-complete accumulated))
                (mu4e-llm--worker-finish worker accumulated)))
-           ;; Error callback
-           (lambda (err)
+           ;; Error callback.  llm.el calls this with an error type and a
+           ;; message string, never an error object, so the message is
+           ;; formatted directly rather than through
+           ;; `error-message-string', which would signal on a string.
+           (lambda (type err)
              (mu4e-llm--worker-error
               worker
-              (format "LLM error: %s" (error-message-string err)))))))
+              (format "LLM error (%s): %s" type err))))))
     (setf (mu4e-llm--worker-llm-request worker) request)
     request))
 

@@ -8,6 +8,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'cl-lib)
 
 ;; Add parent directory to load-path for testing
 (let ((dir (file-name-directory (or load-file-name buffer-file-name))))
@@ -236,6 +237,122 @@
       (should (null (gethash (mu4e-llm--worker-id worker)
                              mu4e-llm--workers)))
       (should (equal '(t . "done") callback-called)))))
+
+;;; ==========================================================================
+;;; Chat Tests (mu4e-llm--chat)
+;;; ==========================================================================
+
+;; These are the first tests here that stub a function.  `llm-chat-streaming'
+;; and `llm-make-chat-prompt' are only declared in mu4e-llm-core, so they are
+;; unbound unless llm is installed; `cl-letf' binds them either way.
+;;
+;; `mu4e-llm--chat' opens with (unless (featurep 'llm) (require 'llm)), which
+;; fails when llm is absent.  `features' cannot be let-bound around that:
+;; it is not a special variable, so under lexical binding the binding is
+;; lexical and `featurep' keeps reading the global list.  Stub `require'
+;; instead.  The stubbed body requires nothing else.
+
+(defmacro mu4e-llm-test--with-stubbed-llm (streaming-fn &rest body)
+  "Run BODY with `llm-chat-streaming' bound to STREAMING-FN.
+`llm-make-chat-prompt' returns its argument unchanged, and `require' is a
+no-op so no real llm is loaded."
+  (declare (indent 1) (debug t))
+  `(let ((mu4e-llm-provider 'test-provider))
+     (cl-letf (((symbol-function 'require) (lambda (&rest _) nil))
+               ((symbol-function 'llm-make-chat-prompt) (lambda (p &rest _) p))
+               ((symbol-function 'llm-chat-streaming) ,streaming-fn))
+       ,@body)))
+
+(ert-deftest mu4e-llm-test-chat-error-callback-takes-two-arguments ()
+  "llm.el calls the error callback with an error type and a message.
+A one-argument callback signals `wrong-number-of-arguments' instead of
+reporting the provider's message."
+  (let ((mu4e-llm--workers (make-hash-table :test 'equal))
+        (mu4e-llm--worker-counter 0)
+        (reported nil))
+    (mu4e-llm-test--with-stubbed-llm
+        (lambda (_provider _prompt _partial _done errcb)
+          (funcall errcb 'llm-http-error "rate limited")
+          'fake-request)
+      (let ((worker (mu4e-llm--create-worker
+                     'summary nil
+                     (lambda (success result) (setq reported (cons success result))))))
+        (mu4e-llm--chat worker "prompt" nil nil)
+        (should (equal nil (car reported)))
+        (should (string-match-p "rate limited" (cdr reported)))))))
+
+(ert-deftest mu4e-llm-test-chat-error-message-is-a-string ()
+  "The second argument is a message, not an error object.
+`error-message-string' on it signals `wrong-type-argument', so it must
+not be used to format the report."
+  (should-error (error-message-string "rate limited")
+                :type 'wrong-type-argument))
+
+(ert-deftest mu4e-llm-test-chat-error-ignored-when-worker-inactive ()
+  "An error arriving after an abort should not reach the callback."
+  (let ((mu4e-llm--workers (make-hash-table :test 'equal))
+        (mu4e-llm--worker-counter 0)
+        (reported nil))
+    (mu4e-llm-test--with-stubbed-llm
+        (lambda (_provider _prompt _partial _done errcb)
+          (funcall errcb 'llm-http-error "too late")
+          'fake-request)
+      (let ((worker (mu4e-llm--create-worker
+                     'summary nil
+                     (lambda (success result) (setq reported (cons success result))))))
+        (setf (mu4e-llm--worker-active worker) nil)
+        (mu4e-llm--chat worker "prompt" nil nil)
+        (should (null reported))))))
+
+(ert-deftest mu4e-llm-test-chat-success-path ()
+  "A successful run reaches on-partial and on-complete, and stores the request."
+  (let ((mu4e-llm--workers (make-hash-table :test 'equal))
+        (mu4e-llm--worker-counter 0)
+        (partials nil)
+        (completed nil))
+    (mu4e-llm-test--with-stubbed-llm
+        (lambda (_provider _prompt partial done _errcb)
+          (funcall partial "par")
+          (funcall partial "partial text")
+          (funcall done "ignored")
+          'fake-request)
+      (let ((worker (mu4e-llm--create-worker 'summary nil)))
+        (mu4e-llm--chat worker "prompt"
+                        (lambda (text) (push text partials))
+                        (lambda (text) (setq completed text)))
+        (should (equal '("partial text" "par") partials))
+        (should (equal "partial text" completed))
+        (should (eq 'fake-request (mu4e-llm--worker-llm-request worker)))))))
+
+(ert-deftest mu4e-llm-test-chat-passes-provider-and-prompt ()
+  "The resolved provider and the prompt reach `llm-chat-streaming'."
+  (let ((mu4e-llm--workers (make-hash-table :test 'equal))
+        (mu4e-llm--worker-counter 0)
+        (seen nil))
+    (mu4e-llm-test--with-stubbed-llm
+        (lambda (provider prompt &rest _) (setq seen (cons provider prompt)) nil)
+      (mu4e-llm--chat (mu4e-llm--create-worker 'summary nil) "the prompt" nil nil)
+      (should (eq 'test-provider (car seen)))
+      (should (equal "the prompt" (cdr seen))))))
+
+(ert-deftest mu4e-llm-test-chat-streaming-contract ()
+  "Pin the real `llm-chat-streaming' arity, when llm is installed.
+The stubs above pin this package's assumption about llm.el rather than
+llm.el itself.  Four arguments is too few; five reaches the nil-provider
+method and signals something else.  `func-arity' cannot be used here
+because `llm-chat-streaming' is a generic and reports (1 . many)."
+  ;; The Makefile runs emacs with -Q, so package.el is not initialised and
+  ;; an installed llm is not yet on the load path.  Try that before giving
+  ;; up, or this test would skip everywhere, including CI.
+  (skip-unless (or (require 'llm nil t)
+                   (progn (require 'package)
+                          (package-initialize)
+                          (require 'llm nil t))))
+  (let ((cb (lambda (&rest _) nil)))
+    (should-error (llm-chat-streaming nil "p" cb cb)
+                  :type 'wrong-number-of-arguments)
+    (let ((err (should-error (llm-chat-streaming nil "p" cb cb cb))))
+      (should-not (eq (car err) 'wrong-number-of-arguments)))))
 
 (provide 'mu4e-llm-test)
 ;;; mu4e-llm-test.el ends here
