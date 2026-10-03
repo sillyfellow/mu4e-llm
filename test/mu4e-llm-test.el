@@ -18,6 +18,7 @@
 (require 'mu4e-llm-thread)
 (require 'mu4e-llm-core)
 (require 'mu4e-llm-summary)
+(require 'mu4e-llm)
 
 ;;; ==========================================================================
 ;;; Body Cleanup Tests (mu4e-llm-thread--clean-body)
@@ -571,6 +572,86 @@ This is the guard that the table cannot alter existing behaviour."
     (should (equal "explicit"
                    (mu4e-llm-test-provider-chat-model
                     (mu4e-llm--provider-for 'draft))))))
+
+;;; ==========================================================================
+;;; Keymap Prefix Tests (mu4e-llm-setup)
+;;; ==========================================================================
+
+;; Must be special: `mu4e-llm-setup' finds the parent map with `boundp' and
+;; `symbol-value', which only see dynamic bindings.  A plain `let' in this
+;; lexically bound file would be invisible to it.
+(defvar mu4e-llm-test--parent nil
+  "A stand-in parent prefix map for the setup tests.")
+
+(defmacro mu4e-llm-test--with-setup (prefix parent suffix &rest body)
+  "Run `mu4e-llm-setup' with PREFIX, PARENT and SUFFIX, then run BODY.
+The mode map is fresh each time so bindings do not leak between tests."
+  (declare (indent 3) (debug t))
+  `(let ((mu4e-llm-keymap-prefix ,prefix)
+         (mu4e-llm-parent-keymap ,parent)
+         (mu4e-llm-parent-keymap-suffix ,suffix)
+         (mu4e-llm-mode-map (make-sparse-keymap)))
+     (cl-letf (((symbol-function 'message) (lambda (&rest _) nil)))
+       (mu4e-llm-setup))
+     ,@body))
+
+(ert-deftest mu4e-llm-test-setup-binds-into-a-parent-map ()
+  "The suffix is bound in the configured parent map."
+  (let ((mu4e-llm-test--parent (make-sparse-keymap)))
+    (mu4e-llm-test--with-setup "C-c a e" 'mu4e-llm-test--parent "e"
+      (should (eq mu4e-llm-map
+                  (lookup-key mu4e-llm-test--parent (kbd "e")))))))
+
+(ert-deftest mu4e-llm-test-setup-without-a-parent-map ()
+  "With no parent map bound, setup still binds the local prefix."
+  (mu4e-llm-test--with-setup "C-c a e" 'mu4e-llm-test--no-such-map "e"
+    (should (eq mu4e-llm-map
+                (lookup-key mu4e-llm-mode-map (kbd "C-c a e"))))))
+
+(ert-deftest mu4e-llm-test-setup-accepts-a-bare-key ()
+  "A single unmodified key works, which the old C-c a regex refused."
+  (mu4e-llm-test--with-setup "i" nil nil
+    (should (eq mu4e-llm-map (lookup-key mu4e-llm-mode-map (kbd "i"))))
+    (should (eq 'mu4e-llm-summarize (lookup-key mu4e-llm-mode-map (kbd "i s"))))))
+
+(ert-deftest mu4e-llm-test-setup-accepts-an-unrelated-prefix ()
+  "A prefix that is not C-c a shaped binds correctly."
+  (mu4e-llm-test--with-setup "C-, e" nil nil
+    (should (eq mu4e-llm-map (lookup-key mu4e-llm-mode-map (kbd "C-, e"))))))
+
+(ert-deftest mu4e-llm-test-setup-keeps-the-old-prefix-working ()
+  "The previous default still binds, so existing users are unaffected."
+  (mu4e-llm-test--with-setup "C-c a e" nil nil
+    (should (eq 'mu4e-llm-summarize
+                (lookup-key mu4e-llm-mode-map (kbd "C-c a e s"))))))
+
+(ert-deftest mu4e-llm-test-setup-reaches-every-command ()
+  "Every command in `mu4e-llm-map' is reachable through the prefix."
+  (mu4e-llm-test--with-setup "i" nil nil
+    (map-keymap
+     (lambda (event def)
+       (should (eq def (lookup-key mu4e-llm-mode-map
+                                   (vconcat (kbd "i") (vector event))))))
+     mu4e-llm-map)))
+
+(ert-deftest mu4e-llm-test-setup-is-idempotent ()
+  "Calling setup twice leaves the same bindings."
+  (let ((mu4e-llm-test--parent (make-sparse-keymap)))
+    (mu4e-llm-test--with-setup "i" 'mu4e-llm-test--parent "e"
+      (cl-letf (((symbol-function 'message) (lambda (&rest _) nil)))
+        (mu4e-llm-setup))
+      (should (eq mu4e-llm-map (lookup-key mu4e-llm-mode-map (kbd "i"))))
+      (should (eq mu4e-llm-map (lookup-key mu4e-llm-test--parent (kbd "e"))))
+      (should (eq 'mu4e-llm-summarize
+                  (lookup-key mu4e-llm-mode-map (kbd "i s")))))))
+
+(ert-deftest mu4e-llm-test-help-names-the-configured-prefix ()
+  "The help text should not advertise a prefix that is not in use."
+  (let ((mu4e-llm-keymap-prefix "i"))
+    (should (string-match-p "\\bi\\b" (mu4e-llm--help-text))))
+  (let ((mu4e-llm-keymap-prefix "C-, e"))
+    (should (string-match-p "C-, e" (mu4e-llm--help-text)))
+    (should-not (string-match-p "C-c a e prefix" (mu4e-llm--help-text)))))
 
 (provide 'mu4e-llm-test)
 ;;; mu4e-llm-test.el ends here

@@ -324,13 +324,27 @@ The %s placeholder is replaced with the formatted email thread."
 
 ;;; --- Keybinding Settings ---
 
+(defcustom mu4e-llm-parent-keymap 'ai-commands-prefix-map
+  "Symbol naming a prefix keymap to hang the commands under, or nil.
+When the symbol is bound to a keymap, `mu4e-llm-map' is bound inside it
+at `mu4e-llm-parent-keymap-suffix'.  When it is nil or unbound, only
+`mu4e-llm-keymap-prefix' is bound and nothing else is required."
+  :type '(choice (const :tag "None" nil) symbol)
+  :group 'mu4e-llm)
+
+(defcustom mu4e-llm-parent-keymap-suffix "e"
+  "Key for `mu4e-llm-map' inside `mu4e-llm-parent-keymap'."
+  :type '(choice (const :tag "None" nil) string)
+  :group 'mu4e-llm)
+
 (defcustom mu4e-llm-keymap-prefix "C-c a e"
-  "Prefix key for mu4e-llm commands.
+  "Prefix key for mu4e-llm commands in mu4e buffers.
 Set to nil to disable automatic keybinding setup.
 Users can then bind `mu4e-llm-map' manually.
 
-If `ai-commands-prefix-map' is available and this prefix starts
-with its prefix, only the suffix will be bound under that map."
+Any key description works, including a single unmodified key such as
+\"i\", which is useful because the mu4e buffers are modal.  Binding
+under a shared prefix map is separate; see `mu4e-llm-parent-keymap'."
   :type '(choice (string :tag "Key sequence")
                  (const :tag "Disable automatic keybindings" nil))
   :group 'mu4e-llm)

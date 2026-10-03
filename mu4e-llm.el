@@ -82,13 +82,12 @@ The actual keybinding is set up by `mu4e-llm-setup' based on
 
 ;;; --- Help ---
 
-(defun mu4e-llm-help ()
-  "Display help for mu4e-llm commands."
-  (interactive)
-  (let ((help-text
-         "mu4e-llm - AI-powered email assistance
+(defun mu4e-llm--help-text ()
+  "Return the help text, naming the prefix actually in use."
+  (format
+   "mu4e-llm - AI-powered email assistance
 
-Keybindings (C-c a e prefix in mu4e):
+Keybindings (%s prefix in mu4e):
   s   Summarize thread
   S   Executive summary (brief)
   r   Generate smart reply
@@ -106,20 +105,25 @@ In draft buffer:
   C-c C-f   Finalize (open in compose)
   C-c C-k   Cancel
 
-Current provider: %s"))
-    (message help-text
-             (condition-case nil
-                 (let* ((provider (mu4e-llm--get-provider))
-                        (type-name (replace-regexp-in-string
-                                    "^llm-" ""
-                                    (symbol-name (type-of provider))))
-                        (model (ignore-errors
-                                 (cl-struct-slot-value
-                                  (type-of provider) 'chat-model provider))))
-                   (if model
-                       (format "%s (%s)" type-name model)
-                     type-name))
-               (error "Not configured")))))
+Current provider: %s"
+   (or mu4e-llm-keymap-prefix "M-x mu4e-llm-")
+   (condition-case nil
+       (let* ((provider (mu4e-llm--get-provider))
+              (type-name (replace-regexp-in-string
+                          "^llm-" ""
+                          (symbol-name (type-of provider))))
+              (model (ignore-errors
+                       (cl-struct-slot-value
+                        (type-of provider) 'chat-model provider))))
+         (if model
+             (format "%s (%s)" type-name model)
+           type-name))
+     (error "Not configured"))))
+
+(defun mu4e-llm-help ()
+  "Display help for mu4e-llm commands."
+  (interactive)
+  (message "%s" (mu4e-llm--help-text)))
 
 ;;; --- Setup ---
 
@@ -135,13 +139,18 @@ Called from mode hooks to ensure keymaps are available."
 Keybindings are controlled by `mu4e-llm-keymap-prefix'.
 If set to nil, no automatic keybindings are created."
   (interactive)
+  ;; Hang the commands under a shared prefix map, when one is configured
+  ;; and actually exists.  This used to be derived by matching the prefix
+  ;; against "C-c a", which made the two inseparable and refused any other
+  ;; prefix shape.
+  (when (and mu4e-llm-parent-keymap
+             mu4e-llm-parent-keymap-suffix
+             (boundp mu4e-llm-parent-keymap)
+             (keymapp (symbol-value mu4e-llm-parent-keymap)))
+    (define-key (symbol-value mu4e-llm-parent-keymap)
+                (kbd mu4e-llm-parent-keymap-suffix)
+                mu4e-llm-map))
   (when mu4e-llm-keymap-prefix
-    ;; Integrate with existing ai-commands-prefix-map if available
-    (when (and (boundp 'ai-commands-prefix-map)
-               (string-match "^C-c a \\(.+\\)$" mu4e-llm-keymap-prefix))
-      (let ((suffix (match-string 1 mu4e-llm-keymap-prefix)))
-        (define-key (symbol-value 'ai-commands-prefix-map) (kbd suffix) mu4e-llm-map)))
-    ;; Set in the minor mode map
     (define-key mu4e-llm-mode-map (kbd mu4e-llm-keymap-prefix) mu4e-llm-map))
   ;; Add hooks for mu4e modes (safe to call before mu4e loads)
   (add-hook 'mu4e-headers-mode-hook #'mu4e-llm-mode)
