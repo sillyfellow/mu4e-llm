@@ -60,6 +60,14 @@
 (defvar-local mu4e-llm-summary--insert-marker nil
   "Marker for inserting streaming content.")
 
+(defvar-local mu4e-llm-summary--current-message nil
+  "The mu4e message this summary was generated from.
+Kept so `mu4e-llm-summary-regenerate' can run again without a mu4e
+buffer being current.")
+
+(defvar-local mu4e-llm-summary--current-type nil
+  "The summary type, `standard' or `executive', for this buffer.")
+
 (defun mu4e-llm-summary--get-buffer ()
   "Get or create the summary buffer."
   (let ((buf (get-buffer-create mu4e-llm-summary-buffer-name)))
@@ -68,13 +76,17 @@
         (mu4e-llm-summary-mode)))
     buf))
 
-(defun mu4e-llm-summary--prepare-buffer (thread type)
-  "Prepare summary buffer for THREAD with TYPE (standard/executive)."
+(defun mu4e-llm-summary--prepare-buffer (msg thread type)
+  "Prepare summary buffer for MSG and THREAD with TYPE.
+TYPE is `standard' or `executive'.  MSG is stored so the summary can be
+regenerated later, when no mu4e buffer is current."
   (let ((buf (mu4e-llm-summary--get-buffer)))
     (with-current-buffer buf
       (setq buffer-read-only nil)
       (erase-buffer)
       (setq mu4e-llm-summary--current-thread thread)
+      (setq mu4e-llm-summary--current-message msg)
+      (setq mu4e-llm-summary--current-type type)
       ;; Insert header
       (insert (propertize
                (format "Thread Summary (%s)\n"
@@ -121,10 +133,15 @@
                               'face 'shadow)))))))
 
 (defun mu4e-llm--summarize-internal (type)
-  "Generate summary of TYPE for message at point.
+  "Generate summary of TYPE for the message at point.
 TYPE is either `standard' or `executive'."
-  (let* ((msg (mu4e-message-at-point))
-         (thread (mu4e-llm-thread-extract msg))
+  (mu4e-llm--summarize-message (mu4e-message-at-point) type))
+
+(defun mu4e-llm--summarize-message (msg type)
+  "Generate summary of TYPE for MSG.
+TYPE is either `standard' or `executive'.  MSG is taken as an argument
+rather than read from point, so a summary buffer can regenerate itself."
+  (let* ((thread (mu4e-llm-thread-extract msg))
          (msg-id (mu4e-llm-thread-message-id thread))
          (msg-count (mu4e-llm-thread-message-count thread))
          (cache-key (mu4e-llm--cache-key msg-id msg-count))
@@ -133,12 +150,12 @@ TYPE is either `standard' or `executive'."
                       (mu4e-llm--cache-get cache-key))))
     (if cached
         ;; Return cached summary
-        (let ((buf (mu4e-llm-summary--prepare-buffer thread type)))
+        (let ((buf (mu4e-llm-summary--prepare-buffer msg thread type)))
           (mu4e-llm-summary--finalize buf cached)
           (display-buffer buf)
           (message "mu4e-llm: Using cached summary"))
       ;; Generate new summary
-      (let* ((buf (mu4e-llm-summary--prepare-buffer thread type))
+      (let* ((buf (mu4e-llm-summary--prepare-buffer msg thread type))
              (context (mu4e-llm-thread-to-prompt-context thread))
              (prompt (format (if (eq type 'executive)
                                  mu4e-llm-summary-executive-prompt
@@ -187,19 +204,23 @@ Shows only the critical information in 2-3 sentences."
   (mu4e-llm--summarize-internal 'executive))
 
 (defun mu4e-llm-summary-regenerate ()
-  "Regenerate the summary for the current thread."
+  "Regenerate the summary shown in this buffer."
   (interactive)
+  (unless (derived-mode-p 'mu4e-llm-summary-mode)
+    (user-error "Not in a mu4e-llm summary buffer"))
   (when mu4e-llm-summary--current-thread
     (when mu4e-llm-summary--current-worker
       (mu4e-llm--abort-worker mu4e-llm-summary--current-worker))
-    ;; Clear cache for this thread
-    (let* ((thread mu4e-llm-summary--current-thread)
+    ;; Read the buffer-local state before regenerating: preparing the
+    ;; buffer erases it and sets it again.
+    (let* ((msg mu4e-llm-summary--current-message)
+           (type mu4e-llm-summary--current-type)
+           (thread mu4e-llm-summary--current-thread)
            (cache-key (mu4e-llm--cache-key
                        (mu4e-llm-thread-message-id thread)
                        (mu4e-llm-thread-message-count thread))))
-      (remhash cache-key mu4e-llm--summary-cache))
-    ;; We need to be in the original mu4e buffer to regenerate
-    (message "mu4e-llm: Please regenerate from the mu4e message view")))
+      (remhash cache-key mu4e-llm--summary-cache)
+      (mu4e-llm--summarize-message msg type))))
 
 (defun mu4e-llm-draft-reply-from-summary ()
   "Start drafting a reply from the summary view."

@@ -17,6 +17,7 @@
 (require 'mu4e-llm-config)
 (require 'mu4e-llm-thread)
 (require 'mu4e-llm-core)
+(require 'mu4e-llm-summary)
 
 ;;; ==========================================================================
 ;;; Body Cleanup Tests (mu4e-llm-thread--clean-body)
@@ -353,6 +354,108 @@ because `llm-chat-streaming' is a generic and reports (1 . many)."
                   :type 'wrong-number-of-arguments)
     (let ((err (should-error (llm-chat-streaming nil "p" cb cb cb))))
       (should-not (eq (car err) 'wrong-number-of-arguments)))))
+
+;;; ==========================================================================
+;;; Summary Regenerate Tests (mu4e-llm-summary-regenerate)
+;;; ==========================================================================
+
+(defun mu4e-llm-test--thread (&optional id count)
+  "Build a minimal thread struct for tests.
+ID defaults to \"m1\" and COUNT to 1."
+  (make-mu4e-llm-thread
+   :message-id (or id "m1")
+   :subject "Test subject"
+   :messages nil
+   :participant-count 1
+   :message-count (or count 1)))
+
+(defmacro mu4e-llm-test--in-summary-buffer (msg type &rest body)
+  "Prepare a summary buffer for MSG and TYPE, then run BODY inside it."
+  (declare (indent 2) (debug t))
+  `(let ((mu4e-llm--workers (make-hash-table :test 'equal))
+         (mu4e-llm--worker-counter 0)
+         (mu4e-llm--summary-cache (make-hash-table :test 'equal)))
+     (cl-letf (((symbol-function 'mu4e-llm-thread-extract)
+                (lambda (_m) (mu4e-llm-test--thread)))
+               ((symbol-function 'mu4e-llm-thread-to-prompt-context)
+                (lambda (_t) "context"))
+               ((symbol-function 'display-buffer) (lambda (b &rest _) b)))
+       (let ((buf (mu4e-llm-summary--prepare-buffer ,msg (mu4e-llm-test--thread) ,type)))
+         (unwind-protect
+             (with-current-buffer buf ,@body)
+           (kill-buffer buf))))))
+
+(ert-deftest mu4e-llm-test-summary-regenerate-starts-a-new-call ()
+  "Regenerate should start another summary, not print an instruction."
+  (let ((called nil))
+    (mu4e-llm-test--in-summary-buffer '(:docid 1) 'standard
+      (cl-letf (((symbol-function 'mu4e-llm--chat)
+                 (lambda (_w prompt &rest _) (setq called prompt) nil))
+                ((symbol-function 'mu4e-llm-thread-extract)
+                 (lambda (_m) (mu4e-llm-test--thread)))
+                ((symbol-function 'mu4e-llm-thread-to-prompt-context)
+                 (lambda (_t) "context"))
+                ((symbol-function 'display-buffer) (lambda (b &rest _) b)))
+        (mu4e-llm-summary-regenerate)
+        (should called)))))
+
+(ert-deftest mu4e-llm-test-summary-regenerate-keeps-the-type ()
+  "An executive summary should regenerate as executive, not as standard."
+  (let ((seen nil))
+    (mu4e-llm-test--in-summary-buffer '(:docid 1) 'executive
+      (cl-letf (((symbol-function 'mu4e-llm--chat)
+                 (lambda (worker &rest _) (setq seen (mu4e-llm--worker-type worker)) nil))
+                ((symbol-function 'mu4e-llm-thread-extract)
+                 (lambda (_m) (mu4e-llm-test--thread)))
+                ((symbol-function 'mu4e-llm-thread-to-prompt-context)
+                 (lambda (_t) "context"))
+                ((symbol-function 'display-buffer) (lambda (b &rest _) b)))
+        (mu4e-llm-summary-regenerate)
+        (should (eq 'executive-summary seen))))))
+
+(ert-deftest mu4e-llm-test-summary-regenerate-clears-the-cache ()
+  "Regenerate drops the cached entry, so the rerun is a real call."
+  (mu4e-llm-test--in-summary-buffer '(:docid 1) 'standard
+    (let ((key (mu4e-llm--cache-key "m1" 1)))
+      (mu4e-llm--cache-set key "stale summary")
+      (should (mu4e-llm--cache-get key))
+      (cl-letf (((symbol-function 'mu4e-llm--chat) (lambda (&rest _) nil))
+                ((symbol-function 'mu4e-llm-thread-extract)
+                 (lambda (_m) (mu4e-llm-test--thread)))
+                ((symbol-function 'mu4e-llm-thread-to-prompt-context)
+                 (lambda (_t) "context"))
+                ((symbol-function 'display-buffer) (lambda (b &rest _) b)))
+        (mu4e-llm-summary-regenerate))
+      (should-not (mu4e-llm--cache-get key)))))
+
+(ert-deftest mu4e-llm-test-summary-regenerate-aborts-the-running-worker ()
+  "A summary still streaming should be aborted before the rerun."
+  (let ((aborted nil))
+    (mu4e-llm-test--in-summary-buffer '(:docid 1) 'standard
+      (setq mu4e-llm-summary--current-worker
+            (mu4e-llm--create-worker 'summary nil))
+      (cl-letf (((symbol-function 'mu4e-llm--abort-worker)
+                 (lambda (w) (setq aborted w)))
+                ((symbol-function 'mu4e-llm--chat) (lambda (&rest _) nil))
+                ((symbol-function 'mu4e-llm-thread-extract)
+                 (lambda (_m) (mu4e-llm-test--thread)))
+                ((symbol-function 'mu4e-llm-thread-to-prompt-context)
+                 (lambda (_t) "context"))
+                ((symbol-function 'display-buffer) (lambda (b &rest _) b)))
+        (mu4e-llm-summary-regenerate)
+        (should aborted)))))
+
+(ert-deftest mu4e-llm-test-summary-regenerate-outside-a-summary-buffer ()
+  "Regenerate elsewhere should say so rather than fail obscurely."
+  (with-temp-buffer
+    (should-error (mu4e-llm-summary-regenerate) :type 'user-error)))
+
+(ert-deftest mu4e-llm-test-summary-state-survives-finalize ()
+  "The stored message and type outlive a completed summary."
+  (mu4e-llm-test--in-summary-buffer '(:docid 7) 'executive
+    (mu4e-llm-summary--finalize (current-buffer) "done")
+    (should (equal '(:docid 7) mu4e-llm-summary--current-message))
+    (should (eq 'executive mu4e-llm-summary--current-type))))
 
 (provide 'mu4e-llm-test)
 ;;; mu4e-llm-test.el ends here
