@@ -457,5 +457,120 @@ ID defaults to \"m1\" and COUNT to 1."
     (should (equal '(:docid 7) mu4e-llm-summary--current-message))
     (should (eq 'executive mu4e-llm-summary--current-type))))
 
+;;; ==========================================================================
+;;; Per-operation Model Tests (mu4e-llm-operation-models)
+;;; ==========================================================================
+
+;; A stand-in for an llm.el provider.  The real structs are not available
+;; here, and all that matters is that it is a record with a chat-model slot,
+;; which every llm.el provider has.
+(cl-defstruct mu4e-llm-test-provider chat-model key)
+
+(defmacro mu4e-llm-test--with-provider (table &rest body)
+  "Run BODY with a stub provider and `mu4e-llm-operation-models' set to TABLE."
+  (declare (indent 1) (debug t))
+  `(let ((mu4e-llm-provider (make-mu4e-llm-test-provider
+                             :chat-model "base-model" :key "k"))
+         (mu4e-llm-operation-models ,table))
+     ,@body))
+
+(ert-deftest mu4e-llm-test-models-absent-type-is-untouched ()
+  "An operation not in the table resolves to the provider unchanged.
+This is the guard that the table cannot alter existing behaviour."
+  (mu4e-llm-test--with-provider '((draft . (:model "other")))
+    (should (eq mu4e-llm-provider (mu4e-llm--provider-for 'summary)))))
+
+(ert-deftest mu4e-llm-test-models-empty-table-is-untouched ()
+  "An empty table behaves exactly as no table."
+  (mu4e-llm-test--with-provider nil
+    (should (eq mu4e-llm-provider (mu4e-llm--provider-for 'summary)))))
+
+(ert-deftest mu4e-llm-test-models-listed-type-gets-its-model ()
+  "A listed operation resolves to a provider carrying the table's model."
+  (mu4e-llm-test--with-provider '((summary . (:model "fast-model")))
+    (should (equal "fast-model"
+                   (mu4e-llm-test-provider-chat-model
+                    (mu4e-llm--provider-for 'summary))))))
+
+(ert-deftest mu4e-llm-test-models-does-not-mutate-the-shared-provider ()
+  "Resolution copies.  The provider object is shared with other tools."
+  (mu4e-llm-test--with-provider '((summary . (:model "fast-model")))
+    (let ((resolved (mu4e-llm--provider-for 'summary)))
+      (should-not (eq resolved mu4e-llm-provider))
+      (should (equal "base-model"
+                     (mu4e-llm-test-provider-chat-model mu4e-llm-provider)))
+      (should (equal "fast-model"
+                     (mu4e-llm-test-provider-chat-model resolved))))))
+
+(ert-deftest mu4e-llm-test-models-reasoning-only-keeps-the-base-model ()
+  "An entry with a reasoning level but no model leaves the model alone."
+  (mu4e-llm-test--with-provider '((summary . (:reasoning "low")))
+    (should (equal "base-model"
+                   (mu4e-llm-test-provider-chat-model
+                    (mu4e-llm--provider-for 'summary))))
+    (should (equal '(("reasoning_effort" . "low"))
+                   (mu4e-llm--reasoning-params-for 'summary)))))
+
+(ert-deftest mu4e-llm-test-models-model-only-sends-no-reasoning ()
+  "An entry with a model but no reasoning sends no reasoning_effort."
+  (mu4e-llm-test--with-provider '((summary . (:model "fast-model")))
+    (should (null (mu4e-llm--reasoning-params-for 'summary)))))
+
+(ert-deftest mu4e-llm-test-models-unknown-type-in-table-is-ignored ()
+  "A table naming an operation that does not exist changes nothing."
+  (mu4e-llm-test--with-provider '((not-a-real-operation . (:model "x")))
+    (should (eq mu4e-llm-provider (mu4e-llm--provider-for 'summary)))
+    (should (null (mu4e-llm--reasoning-params-for 'summary)))))
+
+(ert-deftest mu4e-llm-test-models-every-real-worker-type-resolves ()
+  "All six operation types resolve without error, so none is missed."
+  (mu4e-llm-test--with-provider
+      '((summary           . (:model "a" :reasoning "low"))
+        (executive-summary . (:model "a" :reasoning "low"))
+        (translate         . (:model "a" :reasoning "low"))
+        (draft             . (:model "b" :reasoning "medium"))
+        (compose           . (:model "b" :reasoning "medium"))
+        (refine            . (:model "b" :reasoning "medium")))
+    (dolist (type '(summary executive-summary translate draft compose refine))
+      (should (mu4e-llm-test-provider-p (mu4e-llm--provider-for type)))
+      (should (mu4e-llm--reasoning-params-for type)))))
+
+(ert-deftest mu4e-llm-test-models-reasoning-reaches-the-prompt ()
+  "The reasoning level is sent as a non-standard parameter."
+  (let ((mu4e-llm--workers (make-hash-table :test 'equal))
+        (mu4e-llm--worker-counter 0)
+        (seen-params 'unset)
+        (seen-model nil))
+    (let ((mu4e-llm-operation-models '((summary . (:model "fast" :reasoning "low")))))
+      (let ((mu4e-llm-provider (make-mu4e-llm-test-provider
+                                :chat-model "base-model" :key "k")))
+        (cl-letf (((symbol-function 'require) (lambda (&rest _) nil))
+                  ((symbol-function 'llm-make-chat-prompt)
+                   (lambda (p &rest args)
+                     (setq seen-params (plist-get args :non-standard-params))
+                     p))
+                  ((symbol-function 'llm-chat-streaming)
+                   (lambda (provider &rest _)
+                     (setq seen-model (mu4e-llm-test-provider-chat-model provider))
+                     nil)))
+          (mu4e-llm--chat (mu4e-llm--create-worker 'summary nil) "p" nil nil)
+          (should (equal '(("reasoning_effort" . "low")) seen-params))
+          (should (equal "fast" seen-model)))))))
+
+(ert-deftest mu4e-llm-test-models-explicit-provider-still-wins-over-fallback ()
+  "`mu4e-llm-provider' beats the fallback variable, and the table applies on top."
+  (let* ((fallback (make-mu4e-llm-test-provider :chat-model "fallback" :key "k"))
+         (mu4e-llm-test--fallback fallback)
+         (mu4e-llm-provider (make-mu4e-llm-test-provider :chat-model "explicit" :key "k"))
+         (mu4e-llm-provider-fallback-variable 'mu4e-llm-test--fallback)
+         (mu4e-llm-operation-models '((summary . (:model "from-table")))))
+    (ignore mu4e-llm-test--fallback)
+    (should (equal "from-table"
+                   (mu4e-llm-test-provider-chat-model
+                    (mu4e-llm--provider-for 'summary))))
+    (should (equal "explicit"
+                   (mu4e-llm-test-provider-chat-model
+                    (mu4e-llm--provider-for 'draft))))))
+
 (provide 'mu4e-llm-test)
 ;;; mu4e-llm-test.el ends here

@@ -68,6 +68,30 @@ Longer messages are truncated with ellipsis."
 
 ;;; --- Caching Settings ---
 
+(defcustom mu4e-llm-operation-models nil
+  "Model and reasoning level per operation, overriding the provider.
+
+An alist keyed by operation type.  The types are `summary',
+`executive-summary', `translate', `draft', `compose' and `refine'.
+Each value is a plist accepting `:model' and `:reasoning', both
+optional:
+
+  \='((summary   . (:model \"gpt-6-luna\"  :reasoning \"low\"))
+    (draft     . (:model \"gpt-6.1-sol\" :reasoning \"medium\")))
+
+An operation absent from this table uses the provider as resolved by
+`mu4e-llm-provider' and `mu4e-llm-provider-fallback-variable', so the
+default of nil leaves every operation unchanged.  Nothing inherits:
+list each operation you want to pin.
+
+`:reasoning' is sent to the provider as a `reasoning_effort' request
+parameter, so its accepted values are the provider's, not llm.el's.
+llm.el has a `:reasoning' argument of its own, but the Open AI provider
+does not read it, which is why this goes through a request parameter
+instead."
+  :type '(alist :key-type symbol :value-type plist)
+  :group 'mu4e-llm)
+
 (defcustom mu4e-llm-cache-summaries t
   "Whether to cache thread summaries.
 Summaries are cached by thread-id and message count."

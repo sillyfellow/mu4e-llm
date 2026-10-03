@@ -89,6 +89,30 @@ by `mu4e-llm-provider-fallback-variable'."
 Set `mu4e-llm-provider' to an llm.el provider, e.g.:
   (setq mu4e-llm-provider (make-llm-openai :key \"your-key\"))")))
 
+(defun mu4e-llm--operation-spec (type)
+  "Return the `mu4e-llm-operation-models' entry for TYPE, or nil."
+  (cdr (assq type mu4e-llm-operation-models)))
+
+(defun mu4e-llm--provider-for (type)
+  "Return the provider to use for operation TYPE.
+When TYPE names a model in `mu4e-llm-operation-models', return a copy of
+the resolved provider with that model.  The provider is shared with the
+rest of the user\='s AI tools, so it is copied rather than modified."
+  (let* ((base (mu4e-llm--get-provider))
+         (model (plist-get (mu4e-llm--operation-spec type) :model)))
+    (if (not model)
+        base
+      (let ((copy (copy-sequence base)))
+        (setf (cl-struct-slot-value (type-of copy) 'chat-model copy) model)
+        copy))))
+
+(defun mu4e-llm--reasoning-params-for (type)
+  "Return request parameters carrying the reasoning level for TYPE.
+Nil when `mu4e-llm-operation-models' sets no level for TYPE."
+  (let ((level (plist-get (mu4e-llm--operation-spec type) :reasoning)))
+    (when level
+      (list (cons "reasoning_effort" level)))))
+
 ;;; --- Worker Lifecycle ---
 
 (defun mu4e-llm--create-worker (type message &optional callback metadata)
@@ -159,8 +183,11 @@ ON-COMPLETE is called with final text when done.
 Returns the llm request object."
   (unless (featurep 'llm)
     (require 'llm))
-  (let* ((provider (mu4e-llm--get-provider))
-         (chat-prompt (llm-make-chat-prompt prompt))
+  (let* ((type (mu4e-llm--worker-type worker))
+         (provider (mu4e-llm--provider-for type))
+         (chat-prompt (llm-make-chat-prompt
+                       prompt
+                       :non-standard-params (mu4e-llm--reasoning-params-for type)))
          (accumulated "")
          (request
           (llm-chat-streaming
